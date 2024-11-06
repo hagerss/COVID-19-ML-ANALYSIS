@@ -1,0 +1,777 @@
+---
+title: "FINAL PROJECT :Predicting Antibody-Inducing Activity in COVID-19 B-cell Epitopes using Machine Learning Models"
+output:
+  pdf_document: default
+  html_notebook: default
+editor_options:
+  markdown:
+    wrap: 72
+author : Hajer siala 
+---
+
+## Data Exploration
+
+```{r loaddata }
+
+library(caret)
+library(dplyr)
+# Download the dataset
+url <- "https://drive.google.com/uc?export=download&id=1xSBfWdoldKpJjClsrSSAqJUZGNMJVCyT"
+download.file(url, destfile = "inputcovid.csv")
+url <- "https://drive.google.com/uc?export=download&id=1iABR09kybF4_gqaOxvehZgNacZKxozl7"
+download.file(url, destfile = "inputbcell.csv")
+url <- "https://drive.google.com/uc?export=download&id=1wbxzTrymn1jd9sJMoUqkgQE-7NQs_crO"
+download.file(url, destfile = "inputsars.csv")
+
+
+# Load the datasets
+train_1 <- read.csv('inputbcell.csv', stringsAsFactors = FALSE)
+train_2 <- read.csv('inputsars.csv', stringsAsFactors = FALSE)
+test_covid <- read.csv('inputcovid.csv', stringsAsFactors = FALSE)
+
+# Combine the two datasets into one
+data <- rbind(train_1, train_2)
+str(data)
+```
+
+Input_bcell.csv contains data related to B-cells in vitro and
+input_sars.csv contains data for SARS-CoV-1, both datasets are related
+to the antibody response. I chose to combine them as training data for
+the COVID-19 B-cell epitope prediction task. Both datasets contain sames
+features and similar target variable distributions.
+
+In my dataset, there are both numerical and categorical variables. The
+categorical variables include parent_protein_id, protein_seq, and
+peptide_seq. The numerical variables are start_position, end_position,
+chou_fasman, emini, kolaskar_tongaonkar, parker, isoelectric_point,
+aromaticity, hydrophobicity, stability, and target. Since my goal is to
+predict epitopes using the physicochemical properties computed from the
+protein and peptide sequences rather than the sequences themselves, I
+don't need parent_protein_id, peptide_seq, and protein_seq as features.
+I will create a new variable for the length of the peptide, which will
+be calculated as the difference between end_position and start_position.
+
+```{r FEATURES}
+library(stats)
+library(nortest)
+library(psych)
+library (dplyr)
+# Remove unnecessary variables
+data_new <- data [,c(-1,-2,-5)]
+str(data_new)
+# Create a new variable for the length of the peptide
+data_new$peptide_length <- data_new$end_position - data_new$start_position
+
+# View the updated dataset
+str(data_new)
+
+```
+
+```{r Distribution }
+# Summary statistics
+summary(data_new)
+
+#  matrix for variables
+variables <- data_new[, c("start_position", "end_position", "chou_fasman", "emini", "kolaskar_tongaonkar", "parker", "target")]
+pairs.panels(variables)
+#  matrix for variables2
+variables2 <- data_new[, c("isoelectric_point", "aromaticity", "hydrophobicity", "stability", "target", "peptide_length")]
+pairs.panels(variables2)
+# apply ad.test 
+apply(data_new , 2, function(x) ad.test(x)$p.value)
+
+```
+
+from the histograms we can see that some variables have a skewed
+distribution , however ,chou_fasman", "kolaskar_tongaonkar and parker
+have bell shaped distribution suggesting a normal distribution From the
+summary, it can be observed that some variables have a wide range of
+values, while others have a smaller range. Considering the large sample
+size, I decided to use the Anderson-Darling test to check for normality
+for each variables For each of the variables in the dataset, the p-value
+obtained from the Anderson-Darling test is extremely small, indicating
+strong evidence against the null hypothesis that the variable follows a
+normal distribution. Therefore, we can conclude that these variables are
+not normally distributed.
+
+```{r missingvalues }
+
+library(missMethods)
+#check for missing values in data
+sum(is.na(data_new))
+#Create a new dataset with random missing values
+set.seed(123)
+data_new_missing <- delete_MCAR(data_new, p = 0.2)
+data_new_imputed <- data_new_missing
+sum(is.na(data_new_missing))
+#impute missing values
+for (i in 1:ncol(data_new_imputed)) {
+  data_new_imputed[, i] <- ifelse(is.na(data_new_imputed[, i]), 
+                                  median(data_new_imputed[, i], na.rm = TRUE), 
+                                  data_new_imputed[, i])
+}
+#Check the number of missing values
+sum(is.na(data_new_imputed))
+
+```
+
+```{r}
+# Look for outliers 
+boxplot(data_new)
+# Look for outliers 
+# Function to find outliers using IQR
+find_outliers <- function(x) {
+  q1 <- quantile(x, 0.25)
+  q3 <- quantile(x, 0.75)
+  iqr <- q3 - q1
+  lower_bound <- q1 - 1.5 * iqr
+  upper_bound <- q3 + 1.5 * iqr
+  return(sum(x < lower_bound | x > upper_bound))
+}
+
+# Apply the find_outliers function to each column of data_new
+out <- apply(data_new[,-12], 2, find_outliers)
+out
+
+```
+
+There is a significant number of outliers in the dataset, and the data
+appears to be non-normally distributed. Instead of imputing these
+outliers with the median, I have decided to leave them as they are, as
+they might have a meaningful impact on the prediction. Normalizing the
+data afterward will help mitigate the effects of these outliers and
+provide a better input for the machine learning algorithms.
+
+```{r Correlation }
+
+# Correlation matrix
+correlation_matrix <- cor(data_new)
+correlation_matrix
+# Visualize the correlation matrix as a heatmap
+library(ggplot2)
+library(reshape2)
+melted_correlation_matrix <- melt(correlation_matrix)
+ggplot(data = melted_correlation_matrix, aes(x = Var1, y = Var2, fill = value)) + 
+  geom_tile() + 
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0, limit = c(-1,1), space = "Lab", guide = "colourbar") + 
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+```
+
+There is not strong evidence of multicollinearity in this correlation
+matrix. except start_position and end_position ths have a correlation
+coefficient of 0.999 the highest correlation value between any two
+predictors is 0.69, which is not very high. The correlation matrix shows
+that most of the features except chou_fasman have weak correlations with
+the target variable, indicating they may not be strong predictors.
+
+```{r}
+library(ggplot2)
+
+# Calculate percentage of each class
+class_perc <- prop.table(table(data_new$target))
+class_perc
+
+# Create bar plot
+ggplot(data = data.frame(Class = names(class_perc), Percentage = as.numeric(class_perc)),
+       aes(x = Class, y = Percentage, fill = Class)) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = "Class", y = "Percentage")
+
+plot(data_new$chou_fasman,data_new$target)
+```
+
+The target variable is binary (0,1) and is imbalanced, with 72% of the
+observations belonging to the negative class and 27% to the positive
+class. I will take note of this and address it later when evaluating my
+models. 
+
+## Data cleaning and shaping
+
+```{r dummycode}
+library(fastDummies)
+data_d <-data_new
+data_d$peptide_length <- cut(data_new$peptide_length, 
+                                breaks = c(0, 50, 150, Inf), 
+                                labels = c("small", "medium", "large"))
+# Create dummy variables for length_category
+data_dummy<-dummy_cols(data_d, select_columns = "peptide_length")
+str(data_dummy)
+```
+
+I transformed the continuous variable "peptide_length" into a
+categorical variable with three levels ("small", "medium", and "large")
+using binning, and then I created dummy variables for this categorical
+variable. I excluded the engineered variables from my models because
+their inclusion led to a decrease in model performance.
+
+```{r split,normalize }
+# Split the data into train (70%) and test (30)
+set.seed(123) # for reproducibility
+trainIndex <- createDataPartition(data_new$target, p = 0.7, list = FALSE)
+train <- data_new[trainIndex, ] # 70%
+test_temp <- data_new[-trainIndex, ] # 30%
+# Split the test data further into test (validation, 50%) and big_test (test data, 50%)
+testIndex <- createDataPartition(test_temp$target, p = 0.5, list = FALSE)
+test <- test_temp[testIndex, ] # 15% (50% of test_temp) validation data
+big_test <- test_temp[-testIndex, ] # 15% (50% of test_temp) test data
+
+# Normalize the continuous variables 
+continuous_vars <- c("start_position", "end_position", "chou_fasman", "emini", "kolaskar_tongaonkar", "parker", "isoelectric_point", "aromaticity", "hydrophobicity", "stability", "peptide_length")
+train1<-train[,continuous_vars]
+test1<-test[,continuous_vars]
+big_test1<-big_test[,continuous_vars]
+train_data <- as.data.frame(lapply(train1, function(x) (x - min(x)) / (max(x) - min(x)) * 2 - 1))
+# Define the normalize function
+normalize <- function(x, min_val, max_val) {
+  return ((x - min_val) / (max_val - min_val) * 2 - 1)
+}
+
+# Normalize the validation dataset
+num_columns <- ncol(test1)
+test_data <- data.frame(matrix(ncol = num_columns, nrow = nrow(test)))
+colnames(test_data) <- continuous_vars
+for (i in 1:num_columns) {
+  min_val <- min(train1[, i])
+  max_val <- max(train1[, i])
+  test_data[, i] <- normalize(test1[, i], min_val, max_val)
+}
+
+
+# Normalize the test dataset
+num_columns <- ncol(big_test1)
+big_test_data <- data.frame(matrix(ncol = num_columns, nrow = nrow(big_test)))
+colnames(big_test_data) <- continuous_vars
+for (i in 1:num_columns) {
+  min_val <- min(train1[, i])
+  max_val <- max(train1[, i])
+  big_test_data[, i] <- normalize(big_test1[, i], min_val, max_val)
+}
+
+
+# Add the target_class column back to the train_data, test_data, and big_test_data datasets
+train_data$target_class <- as.factor(train$target)
+test_data$target_class <- as.factor(test$target)
+big_test_data$target_class <- as.factor(big_test$target)
+
+```
+
+```{r pca}
+# Standardize the training data (excluding the target variable)
+train_data_standardized <- scale(train_data[, continuous_vars])
+
+# Apply PCA to the standardized training data
+pca <- prcomp(train_data_standardized, center = TRUE, scale. = TRUE)
+
+# Summary of the PCA
+summary(pca)
+
+num_components <- 8
+
+# Transform the training data
+train_data_pca <- pca$x[, 1:num_components]
+
+# Add the target variable back to the transformed training data
+train_data_pca <- data.frame(train_data_pca, target = train_data$target)
+# Standardize the test data (excluding the target variable) using the means and standard deviations from the training data
+test_data_standardized <- scale(test_data[,-12], center = attr(train_data_standardized, "scaled:center"), scale = attr(train_data_standardized, "scaled:scale"))
+
+# Transform the test data
+test_data_pca <- test_data_standardized %*% pca$rotation[, 1:num_components]
+
+# Add the target variable back to the transformed test data
+test_data_pca <- data.frame(test_data_pca, target = test_data$target)
+
+
+```
+
+Looking at the cumulative proportion of variance, the first two
+principal components (PC1 and PC2) explain about 45.37% of the total
+variance in the dataset.To retain over 95% of the variance,I included
+the first 8 principal components.
+
+My dataset has only 11 variables and a limited number of rows, which
+indicates that the dimensionality is not too high. Additionally, there
+is no evidence of multicollinearity between the features. Given these
+factors, applying PCA might not be necessary.
+
+```{r}
+#Balance the target variable
+library(ROSE)
+
+# use ROSE to oversample the minority class
+train_data_balanced <- ovun.sample(target_class ~ ., data = train_data, method = "both", N = nrow(train_data), p = 0.5, seed = 1)$data
+
+```
+Note : I tried using the balnced dta at first for the models but it decreased performance a lot. so i decided not to use it .
+
+## Model Construction
+
+### Logistic regression model
+
+```{r}
+
+# Fit the logistic regression model
+model <- glm(target_class ~ ., family = binomial(link = 'logit'), data = train_data)#,weights=weights)
+
+# Print the model summary
+summary(model)
+# Predict probabilities on the test dataset
+predicted_probs <- predict(model, newdata = test_data, type = "response")
+head(predicted_probs)
+# Convert probabilities to class labels (0 or 1) based on a 0.5 threshold
+predicted_class <- ifelse(predicted_probs >= 0.5, 1, 0)
+# Calculate the confusion matrix
+cm <- confusionMatrix(table(predicted_class, test_data$target_class),positive = "1")
+
+# Print the confusion matrix and related metrics
+print(cm)
+
+```
+
+Accuracy: 74.15% Precision (Positive Predictive Value): (60.00%) Recall (Sensitivity): (6.10%) Specificity: (98.54%) Kappa: 0.0652 F1 Score:0.1108 (11.08%). Based on these results, it seems that the model is better at identifying negative cases than positive cases. and the low kappa indicates slight agreement between the predicted and actual classifications, beyond what would be expected by chance. This low Kappa value also suggests that the model's performance is not very satisfactory. The model might needs further improvement 
+
+I am going to try feature selection usig AIC stepwise selection 
+
+```{r}
+
+library(MASS)
+
+# Fit the full logistic regression model
+full_model <- glm(target_class ~ ., data = train_data, family = binomial(link = "logit"))
+
+# Perform stepwise feature selection using AIC
+stepwise_model <- stepAIC(full_model, direction = "both", trace = FALSE)
+
+# Print the summary of the stepwise model
+summary(stepwise_model)
+
+# Use the stepwise model to predict on the test dataset
+predicted_proba_stepwise <- predict(stepwise_model, newdata = test_data, type = "response")
+
+# Convert probabilities to class labels (0 or 1) based on a 0.5 threshold
+predicted_stepwise <- ifelse(predicted_proba_stepwise >= 0.5, 1, 0)
+
+# Calculate the confusion matrix
+cm_stepwise <- confusionMatrix(table(predicted_stepwise, test_data$target), positive = "1")
+
+# Print the confusion matrix and related metrics
+print(cm_stepwise)
+```
+
+The feature selection did not show any improvement for the model performance 
+I am going to do hyerparameter tuning using grid and 5 cross fold validation
+
+```{r tuning }
+
+# Convert the target_class factor levels to valid R variable names
+train_data$target_class <- factor(train_data$target_class, 
+                                           labels = make.names(levels(train_data$target_class), unique = TRUE))
+
+# Check the new factor levels
+levels(train_data$target_class)
+library(caret)
+
+# Define the search grid
+grid <- expand.grid(
+    alpha = seq(0, 1, by = 0.1), # L1 regularization parameter
+    lambda = c(0.001, 0.01, 0.1, 1, 10) # L2 regularization parameter
+)
+
+# Train the model with cross-validation
+set.seed(123)
+ctrl <- trainControl(method = "cv", number = 5, verboseIter = TRUE, classProbs = TRUE, summaryFunction = twoClassSummary)
+
+m <- train(target_class ~ ., data = train_data, method = "glmnet", trControl = ctrl, tuneGrid = grid, metric = "ROC", maximize = TRUE)
+```
+
+```{r tuning evaluation}
+library(caret)
+# Predict probabilities on the test dataset
+predicted_proba <- predict(m, newdata = test_data, type = "prob")
+
+# Convert probabilities to class labels (0 or 1) based on a 0.5 threshold
+
+predicted <- ifelse(predicted_proba[, "X1"] >= 0.5, 1, 0)
+#predicted(as.factor(predicted ))
+# Calculate the confusion matrix
+cm <- confusionMatrix(table(predicted, test_data$target_class), positive = "1")
+
+# Print the confusion matrix and related metrics
+print(cm)
+library(pROC)
+# compute ROC curve and AUC
+roc_glmnet <- roc(test_data$target_class, predicted_proba[, "X1"])
+auc_glmnet <- auc(roc_glmnet)
+
+# print AUC
+cat("AUC: ", auc_glmnet, "\n")
+
+```
+
+Comparing the two confusion matrices, we can observe a slight improvement in model performance after hyperparameter tuning.
+
+### SVM model
+
+```{r}
+
+library(e1071)
+levels(train_data$target_class) <- c("0", "1")
+
+# Fit the SVM model
+svm_model <- svm(target_class ~ ., data = train_data, kernel = "radial", cost = 1,type = "C-classification",probability = TRUE)
+
+# Print the SVM model summary
+summary(svm_model)
+
+# Predict class labels on the test dataset
+predicted_class_svm <- predict(svm_model, newdata = test_data)
+
+
+# Calculate the confusion matrix
+cm_svm <- confusionMatrix(table(predicted_class_svm, test_data$target_class),positive = "1")
+
+# Print the confusion matrix and related metrics
+print(cm_svm)
+
+```
+
+Accuracy: 73% of the cases. Recall: The recall is 0.2 Precision: 0,73
+
+Hyperparameter tuning with 3 fold cross validation
+
+```{r tuning svm }
+
+# Convert the target_class factor levels to valid R variable names
+train_data$target_class <- factor(train_data$target_class, 
+                                           labels = make.names(levels(train_data$target_class), unique = TRUE))
+# Set up cross-validation control
+ctrl <- trainControl(method = "cv", number = 3, verboseIter = TRUE, classProbs = TRUE, summaryFunction = twoClassSummary, search = "random")
+
+# Set the search space for hyperparameters
+tune_grid <- expand.grid(C = c(0.1, 1, 10),sigma = c(0.01, 0.1, 1))
+
+# Perform hyperparameter tuning using random search
+set.seed(123)
+tuned_svm <- train(target_class ~ ., data = train_data, method = "svmRadial", trControl = ctrl, tuneGrid = tune_grid, metric = "ROC")
+
+
+
+
+# Train the SVM model with the best parameters
+best_svm_model <- svm(target_class ~ ., data = train_data, kernel = "radial", C = tuned_svm$best.parameters$C, sigma = tuned_svm$best.parameters$sigma, type = "C-classification", probability = TRUE)
+
+summary(best_svm_model)
+
+best_predicted <- ifelse(predict(best_svm_model, newdata = test_data) == "X1", 1, 0)
+cm_svm <- confusionMatrix(table(best_predicted, test_data$target_class),positive = "1")
+cm_svm
+# predict class probabilities on test data
+best_prob <-predict(best_svm_model, newdata = test_data, probability = TRUE)
+best_prob<- attributes(best_prob)$probabilities[, "X1"]
+
+
+# compute ROC curve and AUC
+roc_svm <- roc(test_data$target_class, best_prob)
+auc_svm <- auc(roc_svm)
+
+# print AUC
+cat("AUC: ", auc_svm, "\n")
+
+```
+
+ Accuracy Recall Precision F1 Score Kappa 
+SVM before tuning
+0.7639 0.2129 0.7231 0.3282 0.2430 
+SVM after tuning 
+0.7724 0.2136 0.7368 0.3327 0.2412 
+There is a slight improvement in accuracy after tuning the model
+
+### Random Forest model 
+```{r}
+# Load the randomForest package
+library(randomForest)
+library(caret)
+levels(train_data$target_class) <- c("0", "1")
+# Train the Random Forest model for classification
+rf_model <- randomForest(as.factor(target_class) ~ ., data = train_data, ntree = 500, mtry = 3, importance = TRUE)
+
+# Print the model summary
+print(rf_model)
+
+# Predict class labels on the test dataset
+predicted_class_rf <- predict(rf_model, newdata = test_data)
+
+# Calculate the confusion matrix
+cm_rf <- confusionMatrix(table(predicted_class_rf, test_data$target_class),positive = "1")
+
+# Print the confusion matrix and related metrics
+print(cm_rf)
+# Extract feature importance
+feature_importance <- importance(rf_model)
+
+# Print the feature importance
+print(feature_importance)
+feature_importance$feature <- rownames(importance_data)
+```
+
+```{r}
+
+# Set the class weights
+class_weights <- c(1, 4) 
+# given  27% of the samples belong to the minority class, set 
+#the weight of the majority class to 1 and the weight of the minority class to 4
+
+# Train the model with class weighting
+rf_model_weighted <- randomForest(as.factor(target_class) ~ ., 
+                                  data = train_data, ntree = 500, mtry = 3, importance = TRUE, classwt = class_weights)
+
+# Train the final model using the best hyperparameters and the full dataset
+rf_model_final <- rf_model_weighted
+print(rf_model_final)
+# Make predictions on the test data
+predicted_class_rf <- predict(rf_model_final, newdata = test_data)
+
+# Calculate the confusion matrix
+cm_rf <- confusionMatrix(table(predicted_class_rf, test_data$target_class),positive = "1")
+
+# Print the confusion matrix and related metrics
+print(cm_rf)
+```
+
+### Ensemble function
+
+```{r}
+ensemble_predictions <- function(logistic_model, svm_model, rf_model, new_data) {
+  # Obtain predicted classes for each model
+  class_logistic <- predict(logistic_model, newdata = new_data, type = "raw") 
+  class_svm <- predict(svm_model, newdata = new_data, probability = TRUE)
+  class_rf <- predict(rf_model, newdata = new_data, type = "response")
+  
+  # Combine predicted classes into a matrix
+  class_matrix <- cbind(class_logistic, class_svm, class_rf)
+  
+  # Compute the mode (most common) value for each row of the matrix
+  ensemble_predicted_class <- apply(class_matrix, 1, function(x) {
+    tab <- table(x)
+    as.numeric(names(tab)[which.max(tab)])
+  })
+  
+  return(ensemble_predicted_class)
+}
+
+ 
+  
+
+
+```
+
+### Individual models and ensemble model evaluation on test data set
+
+```{r}
+best_logistic <-m
+best_rf_model <-rf_model
+# Predict class labels using the ensemble model
+predicted_class_ensemble <-  ensemble_predictions(best_logistic, best_svm_model, best_rf_model, big_test_data)
+predicted_class_ensemble <- factor(predicted_class_ensemble, levels = c(1, 2), labels = c("0", "1"))
+# Calculate the confusion matrix
+cm_ensemble <- confusionMatrix(table(predicted_class_ensemble, big_test_data$target_class),positive = "1")
+
+cm_ensemble
+recall <- cm_ensemble$byClass["Sensitivity"]
+precision <- cm_ensemble$byClass["Pos Pred Value"]
+f1_score_cm <- 2 * (precision * recall) / (precision + recall)
+cat("F1: ", f1_score_cm, "\n")
+# Calculate predicted probabilities
+predicted_prob_ensemble <- predict(best_rf_model, newdata = big_test_data, type = "prob")[,2]
+
+# Calculate AUC
+library(pROC)
+auc_ensemble <- roc(big_test_data$target_class, predicted_prob_ensemble)$auc
+cat("AUC: ", auc_ensemble, "\n")
+
+```
+
+```{r}
+predicted_class_rf <- predict(rf_model, newdata = big_test_data)
+
+# Calculate the confusion matrix
+cm_rf<- confusionMatrix(table(predicted_class_rf, big_test_data$target_class),positive = "1")
+
+# Print the confusion matrix and related metrics
+print(cm_rf)
+recall <- cm_rf$byClass["Sensitivity"]
+precision <- cm_rf$byClass["Pos Pred Value"]
+f1_score_rf <- 2 * (precision * recall) / (precision + recall)
+cat("F1: ", f1_score_rf, "\n")
+predicted_prob_rf <- predict(rf_model_final, newdata = big_test_data, type = "prob")[,2]
+
+# Calculate AUC
+library(pROC)
+auc_rf <- roc(big_test_data$target_class, predicted_prob_rf)$auc
+cat("AUC: ", auc_rf, "\n")
+```
+
+```{r}
+svm_predicted <- ifelse(predict(best_svm_model, newdata = big_test_data) == "X1", 1, 0)
+cm_svm <- confusionMatrix(table(svm_predicted, big_test_data$target_class),positive = "1")
+cm_svm
+# predict class probabilities on test data
+best_prob <-predict(best_svm_model, newdata = big_test_data, probability = TRUE)
+best_prob<- attributes(best_prob)$probabilities[, "X1"]
+
+recall <- cm_svm$byClass["Sensitivity"]
+precision <- cm_svm$byClass["Pos Pred Value"]
+
+f1_score_svm <- 2 * (precision * recall) / (precision + recall)
+cat("F1: ", f1_score_svm, "\n")
+# compute ROC curve and AUC
+roc_svm <- roc(big_test_data$target_class, best_prob)
+auc_svm <- auc(roc_svm)
+auc_svm
+
+```
+
+```{r}
+# Predict probabilities on the test dataset
+predicted_proba_t <- predict(m, newdata = big_test_data, type = "prob")
+
+# Convert probabilities to class labels (0 or 1) based on a 0.5 threshold
+
+predicted_logisitc <- ifelse(predicted_proba_t[, "X1"] >= 0.5, 1, 0)
+# Calculate the confusion matrix
+cm <- confusionMatrix(table(predicted_logisitc, big_test_data$target_class), positive = "1")
+cm
+recall <- cm$byClass["Sensitivity"]
+precision <- cm$byClass["Pos Pred Value"]
+f1_score <- 2 * (precision * recall) / (precision + recall)
+cat("F1: ", f1_score, "\n")
+
+
+library(pROC)
+# compute ROC curve and AUC
+roc_glmnet <- roc(big_test_data$target_class, predicted_proba[, "X1"])
+auc_glmnet <- auc(roc_glmnet)
+
+# print AUC
+cat("AUC: ", auc_glmnet, "\n")
+```
+Comparing model performances on the test data:
+
+Ensemble:
+Accuracy: 78.35%
+Recall: 30.85%
+Precision: 83.97%
+F1 score: 45.12%
+AUC: 0.9303505
+
+Random Forest:
+Accuracy: 86.54%
+Recall: 67.13%
+Precision: 82.95%
+F1 score: 74.21%
+AUC: 0.9303505
+
+SVM:
+Accuracy: 71.29%
+Recall: 13.49%
+Precision: 50.88%
+F1 score: 21.32%
+AUC: 0.7817
+
+Logistic Regression:
+Accuracy: 71.69%
+Recall: 4.50%
+Precision: 63.04%
+F1 score: 8.39%
+AUC: 0.6549389
+
+The Random Forest model outperforms the other models in terms of accuracy (86.54%), recall (67.13%), and F1 score (74.21%). The Ensemble and Random Forest models have the same AUC (0.9303505), which is the highest among all models. Based on the F1 and AUC comparison, the Random Forest model demonstrates superior performance in both accuracy and balance between true positives and false positives.
+
+In the context of vaccine development, precision is particularly important because it measures the proportion of true positive predictions among all positive predictions. The Random Forest model's relatively high precision of 82.95% makes it an attractive choice for predicting antibody valence in vaccine development. In predicting antibody valence, false positive predictions can lead to the design of ineffective or even harmful vaccines, making precision a critical metric to consider. Therefore, considering the comprehensive performance metrics, the Random Forest model emerges as the most suitable choice for predicting antibody valence in the context of vaccine development.
+### Make prediction on unlabeled data using ensemble 
+```{r}
+library(dplyr)
+
+
+# Assuming test_covid is your dataset
+new_covid <- test_covid[, -c(1, 2, 5)]
+
+
+# Create a new variable for the length of the peptide
+new_covid$peptide_length <- new_covid$end_position - new_covid$start_position
+
+# View the updated dataset
+head(new_covid)
+
+normalize <- function(x) {
+  if (max(x) == min(x)) {
+    return(rep(0, length(x)))
+  } else {
+    return(2 * (x - min(x)) / (max(x) - min(x)) - 1)
+  }
+}
+
+
+covid <- as.data.frame(lapply(new_covid, normalize))
+
+# View the normalized dataset
+head(covid)
+
+```
+
+```{r}
+best_rf_model <-rf_model_weighted 
+best_logistic <- m
+# Get ensemble predictions for the test_covid data
+test_covid_preds <- ensemble_predictions(best_logistic, best_svm_model, best_rf_model, new_covid)
+predicted_classes_factor <- factor(test_covid_preds, levels = c(1, 2), labels = c("0", "1"))
+new_covid$target <- predicted_classes_factor
+head(new_covid)
+```
+
+### Bagging Random forest Model
+
+```{r}
+# Load the required packages
+library(randomForest)
+library(caret)
+
+# Create a function to generate bootstrapped samples
+bootstrap_samples <- function(data, n_samples) {
+  lapply(1:n_samples, function(i) data[sample(nrow(data), replace = TRUE), ])
+}
+
+# Set the number of bootstrapped samples and models
+n_samples <- 10
+
+# Generate the bootstrapped samples
+bootstrapped_data <- bootstrap_samples(train_data, n_samples)
+
+# Train random forest models on the bootstrapped samples
+rf_models <- lapply(bootstrapped_data, function(data) {
+  randomForest(as.factor(target_class) ~ ., data = data, ntree = 500, mtry = 3)
+})
+
+# Make predictions using the random forest models
+predictions <- lapply(rf_models, function(model) {
+  predict(model, newdata = big_test_data, type = "response")
+})
+
+# Combine the predictions by taking the majority vote
+combined_predictions <- apply(do.call(cbind, predictions), 1, function(x) {
+  tab <- table(x)
+  as.numeric(names(tab)[which.max(tab)])
+})
+combined <- factor(combined_predictions, levels = c(1, 2), labels = c("0", "1"))
+# Calculate the confusion matrix
+cm_bagging <- confusionMatrix(table(combined, big_test_data$target_class), positive = "1")
+
+# Print the confusion matrix and related metrics
+print(cm_bagging)
+
+```
+
+Comparing the two models, the bagged Random Forest model has a slightly lower accuracy, recall, and AUC, but slightly higher precision and F1 score so it certainly decreased the variance  The difference in performance between the two models is relatively small. It's worth noting that the bagged Random Forest model has the advantage of being less prone to overfitting and potentially more robust to noise in the data.
+Based on those results, I conclud that the bagged Random Forest model has good precision and overall acceptable metrics, making it a suitable choice for predicting antibody valency in vaccine development
